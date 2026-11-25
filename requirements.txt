@@ -1,0 +1,7 @@
+faster-whisper>=1.0.0
+imageio-ffmpeg>=0.5.1
+Pillow>=10.0.0
+numpy
+# No Windows o programa usa o yt-dlp.exe oficial (baixado sozinho em bin/).
+# Em Linux/Mac usa a biblioteca:
+yt-dlp>=2025.1.1; sys_platform != "win32"

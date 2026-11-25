@@ -1,0 +1,20 @@
+# ambiente e caches (ficam na pasta do programa, não vão pro GitHub)
+.venv/
+.cache/
+__pycache__/
+*.pyc
+
+# gerados pelo programa
+modelos/
+temp/
+bin/
+logs/
+config.json
+historico.json
+saida/
+
+# executável (vai na aba Releases do GitHub, não no código)
+build/
+dist/
+*.spec
+*.zip
