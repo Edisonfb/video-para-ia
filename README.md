@@ -3,7 +3,7 @@
 Programa que recebe a URL de um vídeo (Instagram, TikTok, YouTube, X ou Facebook) e prepara o material para uma IA analisar **gastando bem menos**:
 
 1. Baixa o vídeo numa **pasta temporária**.
-2. Usa o **FFmpeg** para tirar só as imagens relevantes (trocas de cena, sem repetidas).
+2. Usa o **FFmpeg** para tirar as imagens das trocas de cena, numa quantidade que acompanha a duração do vídeo (sem repetidas).
 3. **Transcreve o áudio no seu próprio PC** com o Whisper (sem custo de API).
 4. Salva tudo na pasta que você escolher, com o nome que você escrever.
 5. **Apaga o vídeo baixado**, sempre, até quando dá erro.
@@ -35,13 +35,28 @@ Você escreve o nome que quiser para cada vídeo. Por exemplo, com o nome `video
 |---|---|
 | `video-estudo-1_LEIA-PARA-IA.md` | **Entregue este pra IA**: dados do post, legenda, lista de imagens e transcrição |
 | `video-estudo-1_transcricao.txt` | Fala do vídeo com marcação de tempo |
-| `video-estudo-1_frame-01_00m00s.jpg` ... | Imagens das cenas (768 px de largura) |
-| `video-estudo-1_mosaico.jpg` | Todas as imagens numa só (a opção mais barata) |
+| `video-estudo-1_frame-01_00m00s.jpg` ... | Imagens das cenas (até 768 px de largura) |
+| `video-estudo-1_mosaico-01.jpg` ... | As imagens agrupadas em mosaicos de 12, 9 ou 6 (a opção mais barata) |
 | `video-estudo-1_info.json` | Metadados (autor, curtidas, views, data) |
+
+## Quantas imagens são tiradas
+
+O vídeo é dividido em "janelas" de tempo e cada janela rende **no máximo 1 imagem**: o momento em que a cena mais mudou (ou o meio da janela, se nada mudou). O começo do vídeo sempre entra. Imagens repetidas são descartadas, então um vídeo parado gera menos imagens.
+
+| Duração do vídeo | 1 imagem a cada (detalhe *normal*) | Exemplo |
+|---|---|---|
+| até 1 min | 3 s | Reel de 30 s → ~10 imagens |
+| até 10 min | 10 s | 5 min → ~30 imagens |
+| até 30 min | 20 s | 30 min → ~90 imagens |
+| mais de 30 min | 30 s | 1 h → ~120 imagens |
+
+Mesmo um vídeo que muda de cena o tempo todo não passa desses números.
 
 ## Opções
 
-- **Máx. imagens**: menos imagens = análise mais barata.
+- **Detalhe**: *pouco* = janelas com o dobro do tempo (metade das imagens, mais barato); *normal* = tabela acima; *muito* = metade do tempo (o dobro das imagens).
+- **Imagens por mosaico**: 12, 9 ou 6. Com 12 sai mais barato; com 6 cada imagem fica maior e mais nítida (bom quando tem texto na tela). Cada mosaico já sai no tamanho máximo que a IA aproveita (1568 px), e custa mais ou menos o mesmo que uma imagem só.
+- **Mande pra IA os mosaicos OU as imagens separadas, não os dois** (senão paga duas vezes).
 - **Transcrição**: `tiny`/`base` são rápidos; `small` é o equilíbrio; `medium`/`large-v3` são mais precisos, mais lentos e ocupam mais espaço.
 - **Login via**: alguns posts exigem estar logado. Escolha o navegador onde você está logado na rede social (o Firefox costuma funcionar melhor; o Chrome no Windows às vezes bloqueia a leitura dos cookies).
 
@@ -82,14 +97,9 @@ Gera `dist\AnaliseVideo\AnaliseVideo.exe` e `dist\AnaliseVideo-windows.zip`. O f
 
 ### Publicar uma versão no GitHub
 
-O workflow `.github/workflows/gerar-exe.yml` gera o executável sozinho nos servidores do GitHub:
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-Em alguns minutos, o `AnaliseVideo-windows.zip` aparece na aba **Releases**. O `.exe` nunca vai para o código (está no `.gitignore`).
+1. Rode o `GERAR_EXE.bat`.
+2. No GitHub: **Releases → Draft a new release**, crie a tag (ex.: `v1.1.0`) e arraste o `dist\AnaliseVideo-windows.zip`.
+3. O `.exe` nunca vai para o código (está no `.gitignore`), só na Release.
 
 ---
 

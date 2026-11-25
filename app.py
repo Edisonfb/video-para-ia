@@ -48,7 +48,7 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Análise de Vídeo — extrai imagens + transcrição")
-        self.geometry("820x640")
+        self.geometry("840x720")
         self.minsize(700, 520)
 
         self.config_dados = ler_json(CONFIG, {})
@@ -94,24 +94,38 @@ class App(tk.Tk):
         # opções
         opc = ttk.LabelFrame(self, text="Opções", padding=8)
         opc.pack(fill="x", padx=10)
-        self.max_frames = tk.IntVar(value=self.config_dados.get("max_frames", 12))
+        self.detalhe = tk.StringVar(value=self.config_dados.get("detalhe", "normal"))
+        self.por_mosaico = tk.StringVar(value=str(self.config_dados.get("por_mosaico", 12)))
         self.modelo = tk.StringVar(value=self.config_dados.get("modelo", "small"))
         self.idioma = tk.StringVar(value=self.config_dados.get("idioma", "auto"))
         self.cookies = tk.StringVar(value=self.config_dados.get("cookies", "nenhum"))
         self.mosaico = tk.BooleanVar(value=self.config_dados.get("mosaico", True))
 
-        ttk.Label(opc, text="Máx. imagens:").grid(row=0, column=0, sticky="w")
-        ttk.Spinbox(opc, from_=3, to=40, width=5, textvariable=self.max_frames).grid(row=0, column=1, padx=6)
-        ttk.Label(opc, text="Transcrição:").grid(row=0, column=2, sticky="w")
-        ttk.Combobox(opc, textvariable=self.modelo, width=9, state="readonly",
-                     values=["tiny", "base", "small", "medium", "large-v3"]).grid(row=0, column=3, padx=6)
-        ttk.Label(opc, text="Idioma:").grid(row=0, column=4, sticky="w")
-        ttk.Combobox(opc, textvariable=self.idioma, width=6, state="readonly",
-                     values=["auto", "pt", "en", "es"]).grid(row=0, column=5, padx=6)
-        ttk.Label(opc, text="Login via:").grid(row=0, column=6, sticky="w")
+        # linha 1: imagens
+        ttk.Label(opc, text="Detalhe:").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(opc, textvariable=self.detalhe, width=8, state="readonly",
+                     values=["pouco", "normal", "muito"]).grid(row=0, column=1, padx=6, sticky="w")
+        ttk.Label(opc, text="Imagens por mosaico:").grid(row=0, column=2, sticky="w")
+        ttk.Combobox(opc, textvariable=self.por_mosaico, width=4, state="readonly",
+                     values=["12", "9", "6"]).grid(row=0, column=3, padx=6, sticky="w")
+        ttk.Checkbutton(opc, text="Gerar mosaicos", variable=self.mosaico).grid(row=0, column=4, padx=6, sticky="w")
+
+        # linha 2: áudio e login
+        ttk.Label(opc, text="Transcrição:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Combobox(opc, textvariable=self.modelo, width=8, state="readonly",
+                     values=["tiny", "base", "small", "medium", "large-v3"]).grid(row=1, column=1, padx=6,
+                                                                                   sticky="w", pady=(6, 0))
+        ttk.Label(opc, text="Idioma:").grid(row=1, column=2, sticky="w", pady=(6, 0))
+        ttk.Combobox(opc, textvariable=self.idioma, width=4, state="readonly",
+                     values=["auto", "pt", "en", "es"]).grid(row=1, column=3, padx=6, sticky="w", pady=(6, 0))
+        ttk.Label(opc, text="Login via:").grid(row=1, column=4, sticky="w", padx=(6, 0), pady=(6, 0))
         ttk.Combobox(opc, textvariable=self.cookies, width=8, state="readonly",
-                     values=["nenhum", "firefox", "chrome", "edge", "brave"]).grid(row=0, column=7, padx=6)
-        ttk.Checkbutton(opc, text="Gerar mosaico", variable=self.mosaico).grid(row=0, column=8, padx=6)
+                     values=["nenhum", "firefox", "chrome", "edge", "brave"]).grid(row=1, column=5, padx=6,
+                                                                                    sticky="w", pady=(6, 0))
+        ttk.Label(opc, foreground="gray", justify="left", text=(
+            "Detalhe: quantas imagens tirar conforme a duração (pouco = metade e mais barato, muito = o dobro).\n"
+            "Imagens por mosaico: 12 = mais barato; 6 = cada imagem maior e mais nítida.")
+        ).grid(row=2, column=0, columnspan=6, sticky="w", pady=(8, 0))
 
         botoes = ttk.Frame(self)
         botoes.pack(pady=8)
@@ -194,13 +208,15 @@ class App(tk.Tk):
             messagebox.showerror("Nome", "Escreva um nome para este vídeo (ex.: video estudo 1).")
             return
 
-        self.config_dados.update(destino=self.destino.get(), max_frames=self.max_frames.get(),
+        self.config_dados.update(destino=self.destino.get(), detalhe=self.detalhe.get(),
+                                 por_mosaico=int(self.por_mosaico.get()),
                                  modelo=self.modelo.get(), idioma=self.idioma.get(),
                                  cookies=self.cookies.get(), mosaico=self.mosaico.get())
         salvar_json(CONFIG, self.config_dados)
 
         opcoes = Opcoes(
-            max_frames=int(self.max_frames.get()),
+            detalhe=self.detalhe.get(),
+            por_mosaico=int(self.por_mosaico.get()),
             modelo_whisper=self.modelo.get(),
             idioma=None if self.idioma.get() == "auto" else self.idioma.get(),
             cookies_navegador=None if self.cookies.get() == "nenhum" else self.cookies.get(),

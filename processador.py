@@ -79,13 +79,14 @@ PLATAFORMAS = {
 
 @dataclass
 class Opcoes:
-    max_frames: int = 12             # limite de imagens (menos imagens = IA mais barata)
+    detalhe: str = "normal"          # pouco / normal / muito -> quantas imagens tirar (ver tamanho_janela)
+    por_mosaico: int = 12            # 12 / 9 / 6 imagens por mosaico (menos = cada imagem maior)
     largura_frame: int = 768         # largura das imagens em px (menor = mais barato)
     sensibilidade_cena: float = 0.30 # 0.1 = pega qualquer mudança, 0.5 = só cortes fortes
     modelo_whisper: str = "small"    # tiny / base / small / medium / large-v3
     idioma: Optional[str] = None     # None = detecta sozinho; "pt", "en"...
     cookies_navegador: Optional[str] = None  # "firefox", "chrome", "edge"... (posts que pedem login)
-    gerar_mosaico: bool = True       # 1 imagem única com todos os frames (o mais barato p/ IA)
+    gerar_mosaico: bool = True       # junta as imagens em mosaicos (o jeito mais barato p/ IA)
 
 
 @dataclass
@@ -284,83 +285,145 @@ def remover_repetidas(candidatos: list[tuple[Path, float]], limite: float = 6.0)
     return mantidas
 
 
+# Regra de quantas imagens tirar: o vídeo é dividido em "janelas" de tempo e cada
+# janela rende no máximo 1 imagem. A janela cresce com a duração do vídeo.
+#   até 1 min -> 1 a cada 3 s | até 10 min -> 10 s | até 30 min -> 20 s | mais -> 30 s
+# Nível de detalhe: "pouco" = janela 2x maior (metade das imagens), "muito" = metade (o dobro).
+FATOR_DETALHE = {"pouco": 2.0, "normal": 1.0, "muito": 0.5}
+
+
+def tamanho_janela(duracao: float, detalhe: str = "normal") -> float:
+    if duracao <= 60:
+        base = 3
+    elif duracao <= 600:
+        base = 10
+    elif duracao <= 1800:
+        base = 20
+    else:
+        base = 30
+    return base * FATOR_DETALHE.get(detalhe, 1.0)
+
+
+def detectar_cenas(ffmpeg: str, video: Path) -> list[tuple[float, float]]:
+    """Retorna [(tempo, intensidade_da_mudança)] de cada troca de cena do vídeo.
+    Analisa uma versão pequena (160 px, 5 quadros/s) pra ser rápido."""
+    filtro = "fps=5,scale=160:-2,select='gt(scene\\,0.08)',metadata=print:file=-"
+    r = rodar([ffmpeg, "-hide_banner", "-nostats", "-i", str(video), "-an", "-vf", filtro, "-f", "null", "-"])
+    cenas, tempo = [], None
+    for linha in r.stdout.splitlines():
+        m = re.search(r"pts_time:([\d.]+)", linha)
+        if m:
+            tempo = float(m.group(1))
+            continue
+        m = re.search(r"lavfi\.scene_score=([\d.]+)", linha)
+        if m and tempo is not None:
+            cenas.append((tempo, float(m.group(1))))
+    return cenas
+
+
 def extrair_frames(video: Path, destino: Path, nome: str, opcoes: Opcoes, log: Log) -> list[tuple[Path, float]]:
-    """Pega frames nas trocas de cena; se forem poucas, completa com intervalos
-    regulares; se forem muitas, escolhe as mais espalhadas no tempo."""
     ffmpeg = caminho_ffmpeg()
     duracao = duracao_video(ffmpeg, video)
-    log(f"🎞️  Extraindo imagens relevantes (duração {segundos_fmt(duracao)})...")
+    janela = tamanho_janela(duracao, opcoes.detalhe)
+    n_janelas = max(1, int(-(-duracao // janela))) if duracao > 0 else 1
+    log(f"🎞️  Procurando as cenas (duração {segundos_fmt(duracao)}, 1 imagem a cada até {janela:g}s, "
+        f"detalhe '{opcoes.detalhe}')...")
+
+    cenas = detectar_cenas(ffmpeg, video)
+
+    # Escolhe 1 momento por janela: a maior troca de cena dela; se não houve troca, o meio da janela
+    # O começo do vídeo (o "gancho") entra sempre; se for igual à próxima, a repetida é descartada
+    tempos: list[float] = [min(0.3, duracao / 2) if duracao else 0.0]
+    for k in range(n_janelas):
+        ini, fim = k * janela, min((k + 1) * janela, duracao or janela)
+        trocas = [(t, s) for t, s in cenas if ini <= t < fim and s >= opcoes.sensibilidade_cena]
+        if trocas:
+            t = max(trocas, key=lambda x: x[1])[0] + 0.3   # um instante depois do corte: imagem nítida
+        elif k == 0:
+            continue                                        # 1ª janela sem corte: o começo já cobre
+        else:
+            t = (ini + fim) / 2
+        tempos.append(min(t, max(0.0, (duracao or t) - 0.1)))
+    tempos = sorted(set(round(t, 2) for t in tempos))
 
     tmp = destino / "_frames_tmp"
     tmp.mkdir(parents=True, exist_ok=True)
-    escala = f"scale={opcoes.largura_frame}:-2"
+    escala = f"scale='min({opcoes.largura_frame},iw)':-2"
+    candidatos: list[tuple[Path, float]] = []
+    for i, t in enumerate(tempos):
+        arq = tmp / f"f_{i:05d}.jpg"
+        rodar([ffmpeg, "-hide_banner", "-loglevel", "error", "-ss", f"{t:.2f}", "-i", str(video),
+               "-frames:v", "1", "-vf", escala, "-q:v", "3", str(arq)])
+        if arq.exists():
+            candidatos.append((arq, t))
 
-    # 1) trocas de cena (sempre inclui o 1º frame)
-    filtro = f"select='eq(n\\,0)+gt(scene\\,{opcoes.sensibilidade_cena})',showinfo,{escala}"
-    r = rodar([ffmpeg, "-hide_banner", "-i", str(video), "-vf", filtro,
-               "-vsync", "vfr", "-q:v", "3", str(tmp / "cena_%04d.jpg")])
-    tempos = [float(t) for t in re.findall(r"pts_time:([\d.]+)", r.stderr)]
-    cenas = sorted(tmp.glob("cena_*.jpg"))
-    candidatos = list(zip(cenas, tempos[: len(cenas)]))
-
-    # 2) poucas cenas? completa com frames em intervalos regulares
-    minimo = max(3, opcoes.max_frames // 2)
-    if len(candidatos) < minimo and duracao > 0:
-        n = opcoes.max_frames
-        for i in range(n):
-            t = duracao * (i + 0.5) / n
-            if any(abs(t - tc) < duracao / (n * 2) for _, tc in candidatos):
-                continue
-            arq = tmp / f"int_{i:04d}.jpg"
-            rodar([ffmpeg, "-hide_banner", "-ss", f"{t:.2f}", "-i", str(video),
-                   "-frames:v", "1", "-vf", escala, "-q:v", "3", str(arq)])
-            if arq.exists():
-                candidatos.append((arq, t))
-
-    candidatos.sort(key=lambda x: x[1])
     candidatos = remover_repetidas(candidatos)
 
-    # 3) muitas? fica com as mais bem distribuídas no tempo
-    if len(candidatos) > opcoes.max_frames:
-        passo = len(candidatos) / opcoes.max_frames
-        candidatos = [candidatos[int(i * passo)] for i in range(opcoes.max_frames)]
-
     finais: list[tuple[Path, float]] = []
+    digitos = max(2, len(str(len(candidatos))))
     for i, (arq, t) in enumerate(candidatos, 1):
-        novo = destino / f"{nome}_frame-{i:02d}_{segundos_fmt(t)}.jpg"
+        novo = destino / f"{nome}_frame-{i:0{digitos}d}_{segundos_fmt(t)}.jpg"
         shutil.move(str(arq), novo)
         finais.append((novo, t))
     shutil.rmtree(tmp, ignore_errors=True)
-    log(f"✅ {len(finais)} imagens salvas.")
+    log(f"✅ {len(finais)} imagens salvas (repetidas descartadas).")
     return finais
 
 
-def gerar_mosaico(frames: list[tuple[Path, float]], destino: Path, nome: str, log: Log) -> Optional[Path]:
-    """Junta todos os frames numa imagem só (grade), com o tempo escrito em cada um."""
+# Grades do mosaico conforme a quantidade por mosaico e o formato do vídeo
+GRADES = {
+    "em_pe": {12: (4, 3), 9: (3, 3), 6: (3, 2)},     # (colunas, linhas) p/ vídeo vertical
+    "deitado": {12: (3, 4), 9: (3, 3), 6: (2, 3)},   # p/ vídeo horizontal
+}
+LADO_MAX_IA = 1568  # a IA reduz imagens maiores que isso; gerar maior é desperdício
+
+
+def gerar_mosaicos(frames: list[tuple[Path, float]], destino: Path, nome: str,
+                   por_mosaico: int, log: Log) -> list[tuple[Path, int, int]]:
+    """Divide as imagens em mosaicos de `por_mosaico` (12, 9 ou 6).
+    Retorna [(arquivo, nº da 1ª imagem, nº da última)]."""
     if not frames:
-        return None
+        return []
     try:
-        from PIL import Image, ImageDraw
+        from PIL import Image, ImageDraw, ImageFont
     except ImportError:
-        return None
-    imgs = [Image.open(p).convert("RGB") for p, _ in frames]
-    larg = 384
-    imgs = [im.resize((larg, int(im.height * larg / im.width))) for im in imgs]
-    alt = max(im.height for im in imgs)
-    colunas = 4 if len(imgs) > 6 else 3 if len(imgs) > 2 else len(imgs)
-    linhas = -(-len(imgs) // colunas)
-    mosaico = Image.new("RGB", (colunas * larg, linhas * alt), "black")
-    desenho = ImageDraw.Draw(mosaico)
-    for i, (im, (_, t)) in enumerate(zip(imgs, frames)):
-        x, y = (i % colunas) * larg, (i // colunas) * alt
-        mosaico.paste(im, (x, y))
-        rotulo = f"{i + 1} | {segundos_fmt(t)}"
-        desenho.rectangle([x, y, x + 9 * len(rotulo) + 8, y + 20], fill="black")
-        desenho.text((x + 4, y + 4), rotulo, fill="yellow")
-    caminho = destino / f"{nome}_mosaico.jpg"
-    mosaico.save(caminho, quality=85)
-    log("🧩 Mosaico gerado (todas as imagens numa só).")
-    return caminho
+        return []
+    try:
+        fonte = ImageFont.load_default(size=16)
+    except TypeError:  # Pillow antigo
+        fonte = ImageFont.load_default()
+
+    with Image.open(frames[0][0]) as im0:
+        proporcao = im0.height / im0.width
+    formato = "em_pe" if proporcao > 1 else "deitado"
+    por_mosaico = por_mosaico if por_mosaico in GRADES[formato] else 12
+    colunas, linhas = GRADES[formato][por_mosaico]
+    # tamanho de cada quadrinho p/ o mosaico inteiro caber em LADO_MAX_IA
+    larg = int(min(LADO_MAX_IA / colunas, LADO_MAX_IA / (linhas * proporcao)))
+    alt = int(larg * proporcao)
+
+    total = -(-len(frames) // por_mosaico)
+    saida = []
+    for m in range(total):
+        grupo = frames[m * por_mosaico:(m + 1) * por_mosaico]
+        usadas_linhas = -(-len(grupo) // colunas)
+        mosaico = Image.new("RGB", (colunas * larg, usadas_linhas * alt), "black")
+        desenho = ImageDraw.Draw(mosaico)
+        for j, (arq, t) in enumerate(grupo):
+            numero = m * por_mosaico + j + 1
+            with Image.open(arq) as im:
+                quadro = im.convert("RGB").resize((larg, alt))
+            x, y = (j % colunas) * larg, (j // colunas) * alt
+            mosaico.paste(quadro, (x, y))
+            rotulo = f" {numero} | {segundos_fmt(t)} "
+            caixa = desenho.textbbox((x + 4, y + 4), rotulo, font=fonte)
+            desenho.rectangle(caixa, fill="black")
+            desenho.text((x + 4, y + 4), rotulo, fill="yellow", font=fonte)
+        caminho = destino / f"{nome}_mosaico-{m + 1:02d}.jpg"
+        mosaico.save(caminho, quality=85)
+        saida.append((caminho, m * por_mosaico + 1, m * por_mosaico + len(grupo)))
+    log(f"🧩 {len(saida)} mosaico(s) gerado(s), {por_mosaico} imagens em cada.")
+    return saida
 
 
 _modelos_cache: dict = {}
@@ -408,7 +471,7 @@ def transcrever(video: Path, pasta_tmp: Path, destino: Path, nome: str, opcoes: 
 
 
 def escrever_resumo(destino: Path, nome: str, url: str, plataforma: str, info: dict,
-                    frames: list[tuple[Path, float]], mosaico: Optional[Path],
+                    frames: list[tuple[Path, float]], mosaicos: list[tuple[Path, int, int]],
                     transcricao: Optional[Path]) -> Path:
     """Um arquivo .md único que você entrega pra IA: metadados + lista de imagens + fala."""
     legenda = (info.get("description") or "").strip()
@@ -431,9 +494,15 @@ def escrever_resumo(destino: Path, nome: str, url: str, plataforma: str, info: d
         legenda or "(sem legenda)",
         "",
         "## Imagens",
+        "Use os MOSAICOS (mais barato) OU as imagens separadas (mais detalhe), não os dois.",
+        "Cada imagem tem um número e o tempo do vídeo em que aparece.",
+        "",
     ]
-    if mosaico:
-        linhas.append(f"- Mosaico com todas: `{mosaico.name}`")
+    if mosaicos:
+        linhas.append("### Mosaicos")
+        linhas += [f"- `{p.name}` — imagens {a} a {b}" for p, a, b in mosaicos]
+        linhas.append("")
+    linhas.append("### Imagens separadas")
     linhas += [f"- {i}. `{p.name}` — {segundos_fmt(t)}" for i, (p, t) in enumerate(frames, 1)]
     linhas += ["", "## Transcrição do áudio"]
     linhas.append(transcricao.read_text(encoding="utf-8") if transcricao else "(sem áudio)")
@@ -497,9 +566,10 @@ def processar(url: str, nome: str, pasta_destino: str | Path, opcoes: Opcoes | N
     try:
         video, info = baixar(url, pasta_tmp, opcoes, log)
         frames = extrair_frames(video, destino, nome, opcoes, log)
-        mosaico = gerar_mosaico(frames, destino, nome, log) if opcoes.gerar_mosaico else None
+        mosaicos = (gerar_mosaicos(frames, destino, nome, opcoes.por_mosaico, log)
+                    if opcoes.gerar_mosaico else [])
         transcricao, _ = transcrever(video, pasta_tmp, destino, nome, opcoes, log)
-        resumo = escrever_resumo(destino, nome, url, plataforma, info, frames, mosaico, transcricao)
+        resumo = escrever_resumo(destino, nome, url, plataforma, info, frames, mosaicos, transcricao)
 
         dados = {k: info.get(k) for k in ("id", "title", "uploader", "duration", "upload_date",
                                           "like_count", "comment_count", "view_count",
@@ -526,12 +596,13 @@ if __name__ == "__main__":
     ap.add_argument("url")
     ap.add_argument("--nome", default="")
     ap.add_argument("--destino", default=str(Path.cwd() / "saida"))
-    ap.add_argument("--frames", type=int, default=12)
+    ap.add_argument("--detalhe", choices=["pouco", "normal", "muito"], default="normal")
+    ap.add_argument("--por-mosaico", type=int, choices=[12, 9, 6], default=12)
     ap.add_argument("--modelo", default="small")
     ap.add_argument("--idioma", default=None)
     ap.add_argument("--cookies", default=None, help="navegador p/ cookies: firefox, chrome, edge")
     a = ap.parse_args()
-    opc = Opcoes(max_frames=a.frames, modelo_whisper=a.modelo, idioma=a.idioma,
+    opc = Opcoes(detalhe=a.detalhe, por_mosaico=a.por_mosaico, modelo_whisper=a.modelo, idioma=a.idioma,
                  cookies_navegador=a.cookies)
     passos: list[str] = []
 
